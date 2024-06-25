@@ -1,7 +1,6 @@
 import argparse
 import os
 from PIL import Image
-import yaml
 from functools import partial
 
 import numpy as np
@@ -116,14 +115,6 @@ def eval_psnr(lr_size, scale_ratio, first_k, eval_type=None, eval_bsize=None, ve
     loader = data._val_dataloader()
 
     loss_fn_alex = lpips.LPIPS(net='alex')
-    ssim = SSIM(data_range=1.0)
-    ssim.attach(default_evaluator, 'ssim')
-
-    cos = torch.nn.CosineSimilarity(dim=1, eps=1e-6)
-
-    vgg = torch.hub.load('pytorch/vision:v0.10.0', 'vgg16', pretrained=True)
-    vgg.eval()
-    vgg = vgg.cuda()
 
     if eval_type is None:
         metric_fn = calc_psnr
@@ -137,17 +128,9 @@ def eval_psnr(lr_size, scale_ratio, first_k, eval_type=None, eval_bsize=None, ve
         raise NotImplementedError
 
     psnr_res = Averager()
-    lr_psnr_res = Averager()
-    ssim_res = Averager()
-    lr_ssim_res = Averager()
-    lr_mse_res = Averager()
     lpips_res = Averager()
-    lr_csim_res = Averager()
 
     pbar = tqdm(loader, leave=False, desc='val')
-    cnt = 0
-    total_image = 0
-    total_time = 0.0
     for batch in pbar:
 
         for k, v in batch.items():
@@ -165,13 +148,8 @@ def eval_psnr(lr_size, scale_ratio, first_k, eval_type=None, eval_bsize=None, ve
                                       ddim_steps=steps, eta=eta, log_every_t=20)
 
         pred = model.decode_first_stage(samples, output_size=output_size)
-
         pred = pred * 0.5 + 0.5
-
-        downsampled = interpolate(pred, lr_size)
-
         pred.clamp_(0, 1)
-        downsampled.clamp_(0, 1)
 
         gt = batch['image_hr']
         gt = gt * 0.5 + 0.5
@@ -182,29 +160,12 @@ def eval_psnr(lr_size, scale_ratio, first_k, eval_type=None, eval_bsize=None, ve
         psnr = metric_fn(pred, gt)
         psnr_res.add(psnr.item(), b_size)
 
-        lr_psnr = metric_fn(downsampled, lr)
-        lr_psnr_res.add(lr_psnr.item(), b_size)
-
-        state = default_evaluator.run([[pred, gt]])
-        ssim_res.add(state.metrics['ssim'], b_size)
-
-        state = default_evaluator.run([[downsampled, lr]])
-        lr_ssim_res.add(state.metrics['ssim'], b_size)
-
         norm = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         pred_n = norm(pred).detach().cpu()
         gt_n = norm(gt).detach().cpu()
 
         loss_lpips = loss_fn_alex(pred_n, gt_n).mean()
         lpips_res.add(loss_lpips.item(), b_size)
-
-        lr_mse = F.mse_loss(downsampled, lr)
-        lr_mse_res.add(lr_mse.item(), b_size)
-
-        q = vgg(interpolate(downsampled, 32))
-        k = vgg(interpolate(lr, 32))
-        output = cos(q, k).mean()
-        lr_csim_res.add(output.item(), b_size)
 
         if save_image:
             save_image = False
@@ -217,16 +178,10 @@ def eval_psnr(lr_size, scale_ratio, first_k, eval_type=None, eval_bsize=None, ve
                 img_lr = (lr[i].permute(1, 2, 0) * 255).to(torch.uint8).detach().cpu().numpy()
                 Image.fromarray(img_lr).save(f'{imgs_path}/{i:6d}_lr.png')
 
-                img_down = (downsampled[i].permute(1, 2, 0) * 255).to(torch.uint8).detach().cpu().numpy()
-                Image.fromarray(img_down).save(f'{imgs_path}/{i:6d}_down.png')
-
         if verbose:
             pbar.set_description('pnsr: {:.4f}, lpips: {:.4f}'.format(psnr_res.item(), lpips_res.item()))
 
-    fin_res = {'PSNR': psnr_res.item(), 'LR_PSNR': lr_psnr_res.item(),
-               'SSIM': ssim_res.item(), 'LPIPS': lpips_res.item(),
-               'LR_MSE': lr_mse_res.item(), 'LR_SSIM': lr_ssim_res.item(),
-               'LR_CSIM': lr_csim_res.item()}
+    fin_res = {'PSNR': psnr_res.item(), 'LPIPS': lpips_res.item()}
 
     return fin_res
 
